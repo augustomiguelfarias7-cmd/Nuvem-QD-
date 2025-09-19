@@ -1,0 +1,215 @@
+"""
+Nuvem QD - Super Máquina Virtual / Nuvem
+Versão 4 - Funcional, real, modular (~200 linhas)
+Objetivo: criar uma infraestrutura de VM/Nuvem totalmente vazia,
+pronta para receber modelos de linguagem futuramente.
+"""
+
+import os
+import sys
+import subprocess
+from pathlib import Path
+import docker
+from docker.errors import APIError, NotFound
+import threading
+import time
+import psutil
+import shutil
+import logging
+
+# Configuração de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+# =================== Classe principal ===================
+
+class NuvemQD:
+    def __init__(self, name: str, cpu_cores_per_container: int, ram_gb_per_container: int, storage_gb_per_container: int):
+        self.name = name
+        self.cpu_cores = cpu_cores_per_container
+        self.ram_gb = ram_gb_per_container
+        self.storage_gb = storage_gb_per_container
+        self.client = docker.from_env()
+        self.containers = []
+
+        # Criação do diretório base de storage
+        self.base_storage = Path(f"./{self.name}_storage")
+        self.base_storage.mkdir(exist_ok=True)
+        logging.info(f"Diretório base de storage criado em: {self.base_storage.resolve()}")
+
+    # ------------------- Funções de container -------------------
+
+    def criar_container(self, container_id: str):
+        """
+        Cria um container Docker real, vazio, pronto para receber modelos.
+        """
+        container_name = f"{self.name}_{container_id}"
+        container_storage = self.base_storage / container_id
+        container_storage.mkdir(exist_ok=True)
+
+        try:
+            container = self.client.containers.run(
+                image="python:3.12-slim",
+                name=container_name,
+                detach=True,
+                tty=True,
+                stdin_open=True,
+                environment={"CONTAINER_ID": container_id},
+                volumes={str(container_storage.resolve()): {'bind': '/storage', 'mode': 'rw'}},
+                mem_limit=f"{self.ram_gb}g",
+                nano_cpus=int(self.cpu_cores * 1e9)
+            )
+            self.containers.append(container)
+            logging.info(f"Container criado: {container_name}")
+            return container
+        except APIError as e:
+            logging.error(f"Erro ao criar container {container_name}: {e}")
+            return None
+
+    def listar_containers(self):
+        """
+        Lista containers ativos
+        """
+        ativos = []
+        for c in self.containers:
+            try:
+                c.reload()
+                if c.status == "running":
+                    ativos.append(c.name)
+            except (APIError, NotFound):
+                continue
+        return ativos
+
+    def parar_container(self, container_name: str):
+        """
+        Para um container específico
+        """
+        for c in self.containers:
+            if c.name == container_name:
+                try:
+                    c.stop()
+                    self.containers.remove(c)
+                    logging.info(f"Container parado: {container_name}")
+                    return True
+                except APIError as e:
+                    logging.error(f"Erro ao parar container {container_name}: {e}")
+                    return False
+        logging.warning(f"Container não encontrado: {container_name}")
+        return False
+
+    def reiniciar_container(self, container_name: str):
+        """
+        Reinicia um container específico
+        """
+        for c in self.containers:
+            if c.name == container_name:
+                try:
+                    c.restart()
+                    logging.info(f"Container reiniciado: {container_name}")
+                    return True
+                except APIError as e:
+                    logging.error(f"Erro ao reiniciar container {container_name}: {e}")
+                    return False
+        logging.warning(f"Container não encontrado: {container_name}")
+        return False
+
+    def iniciar_multiplos(self, quantidade: int):
+        """
+        Cria múltiplos containers vazios de uma vez
+        """
+        for i in range(1, quantidade + 1):
+            self.criar_container(f"container{i}")
+
+    # ------------------- Monitoramento -------------------
+
+    def mostrar_status(self):
+        """
+        Mostra status completo da nuvem
+        """
+        status = {
+            "CPU por container": self.cpu_cores,
+            "RAM por container (GB)": self.ram_gb,
+            "Storage por container (GB)": self.storage_gb,
+            "Containers ativos": self.listar_containers(),
+            "Uso de CPU total (%)": psutil.cpu_percent(),
+            "Uso de RAM total (%)": psutil.virtual_memory().percent
+        }
+        return status
+
+    def monitoramento_continuo(self, intervalo_segundos=10):
+        """
+        Monitoramento em thread separada
+        """
+        def monitor():
+            while True:
+                status = self.mostrar_status()
+                logging.info(f"Status da Nuvem: {status}")
+                time.sleep(intervalo_segundos)
+        thread = threading.Thread(target=monitor, daemon=True)
+        thread.start()
+
+    # ------------------- Storage -------------------
+
+    def listar_storage(self):
+        """
+        Lista diretórios de storage
+        """
+        return [str(d.resolve()) for d in self.base_storage.iterdir() if d.is_dir()]
+
+    def limpar_storage(self):
+        """
+        Limpa todo o storage
+        """
+        if self.base_storage.exists():
+            shutil.rmtree(self.base_storage)
+            self.base_storage.mkdir(exist_ok=True)
+            logging.info("Storage limpo")
+
+    # ------------------- Containers de teste -------------------
+
+    def teste_containers(self):
+        """
+        Cria 3 containers de teste, reinicia e para para verificar fluxo
+        """
+        self.iniciar_multiplos(3)
+        time.sleep(5)
+        ativos = self.listar_containers()
+        for c in ativos:
+            self.reiniciar_container(c)
+        for c in ativos:
+            self.parar_container(c)
+
+# =================== Uso real ===================
+
+if __name__ == "__main__":
+    # Inicializando Nuvem QD
+    nuvem = NuvemQD(
+        name="NuvemQD",
+        cpu_cores_per_container=8,
+        ram_gb_per_container=16,
+        storage_gb_per_container=100
+    )
+
+    # Inicia 5 containers vazios
+    nuvem.iniciar_multiplos(5)
+
+    # Inicia monitoramento contínuo em segundo plano
+    nuvem.monitoramento_continuo(intervalo_segundos=15)
+
+    # Mostra status inicial
+    status_inicial = nuvem.mostrar_status()
+    logging.info(f"Status inicial: {status_inicial}")
+
+    # Lista storage
+    storage_list = nuvem.listar_storage()
+    logging.info(f"Diretórios de storage: {storage_list}")
+
+    # Rodando teste de containers
+    nuvem.teste_containers()
+
+    # Status final
+    status_final = nuvem.mostrar_status()
+    logging.info(f"Status final: {status_final}")
